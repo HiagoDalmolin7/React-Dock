@@ -105,7 +105,7 @@ pub fn windows_list()->Vec<WindowItem> {
 }
 
 pub fn foreground_exe()->Option<String> {
-    unsafe {let hwnd=GetForegroundWindow();if hwnd.is_null(){None}else{exe_for_hwnd(hwnd)}}
+    unsafe {let hwnd=GetForegroundWindow();if hwnd.is_null(){None}else{exe_for_hwnd(hwnd as isize)}}
 }
 
 pub fn focus_window(hwnd:&str)->Result<(),String>{
