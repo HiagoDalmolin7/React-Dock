@@ -5,16 +5,40 @@ const $ = (id) => document.getElementById(id);
 const htmlEscape = (s='') => String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
 let settings, running = [], battery = null, bridge = null, bridgeIcons = [];
 let opened = '', currentEdit = '', messageTimeout = null, lastWinSignature='';
+const cachedIcons = new Map(), pendingIcons = new Set();
 const api = (name, payload={}) => invoke(name,payload);
 
-function glyph(type) {
-  const icons={
-    folder:'📁',globe:'🌐',settings:'⚙️',shield:'🛡️',cpu:'▣',app:'◈',
-    wifi:'⌁',bluetooth:'ᛒ',volume:'◖',bell:'♧',clock:'◷',battery:'▰',
-    tray:'▦',add:'+',menu:'⋯',monitor:'▣',power:'⏻',moon:'☾',airplane:'✈',
-    caret:'⌃',pin:'⌖',terminal:'⌘',mute:'◌',search:'⌕'
-  }; return icons[type]||icons.app;
+const svgPaths={
+    folder: "<path d=\"M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z\"/>",
+    globe: "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18\"/>",
+    settings: "<path d=\"M12 3v2m0 14v2M3 12h2m14 0h2m-15.4-6.4 1.4 1.4m10 10 1.4 1.4m0-12.8-1.4 1.4m-10 10-1.4 1.4\"/><circle cx=\"12\" cy=\"12\" r=\"4\"/>",
+    shield: "<path d=\"M12 2l9 4v6c0 5-3.5 8.5-9 10-5.5-1.5-9-5-9-10V6z\"/><path d=\"m8 12 3 3 5-6\"/>",
+    cpu: "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/><path d=\"M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4M18 9h4M2 15h4m12 0h4\"/>",
+    app: "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"5\"/><path d=\"M8 8h3v3H8zm5 0h3v3h-3zm-5 5h3v3H8zm5 0h3v3h-3z\"/>",
+    wifi: "<path d=\"M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0m-11 4a6 6 0 0 1 8 0\"/><circle cx=\"12\" cy=\"20\" r=\"1\" fill=\"currentColor\" stroke=\"none\"/>",
+    bluetooth: "<path d=\"m7 7 10 10-5 5V2l5 5L7 17\"/>",
+    volume: "<path d=\"M4 9v6h4l5 4V5L8 9H4m12-2a7 7 0 0 1 0 10m2-13a11 11 0 0 1 0 16\"/>",
+    bell: "<path d=\"M18 8a6 6 0 0 0-12 0c0 8-3 8-3 10h18c0-2-3-2-3-10zM10 21h4\"/>",
+    clock: "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v5l3 2\"/>",
+    battery: "<rect x=\"2\" y=\"7\" width=\"19\" height=\"10\" rx=\"2\"/><path d=\"M23 10v4\"/>",
+    menu: "<circle cx=\"5\" cy=\"12\" r=\"1\"/><circle cx=\"12\" cy=\"12\" r=\"1\"/><circle cx=\"19\" cy=\"12\" r=\"1\"/>",
+    monitor: "<rect x=\"3\" y=\"4\" width=\"18\" height=\"13\" rx=\"2\"/><path d=\"M9 21h6m-3-4v4\"/>",
+    power: "<path d=\"M12 2v10M6 5a9 9 0 1 0 12 0\"/>",
+    moon: "<path d=\"M20 15A8 8 0 0 1 9 4 8 8 0 1 0 20 15z\"/>",
+    airplane: "<path d=\"m22 2-8 20-3-9-9-3z\"/>",
+    pin: "<path d=\"M12 21v-8M6 4h12l-2 8 3 3H5l3-3z\"/>",
+    terminal: "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"m7 9 3 3-3 3m5 0h5\"/>",
+    mute: "<path d=\"M4 9v6h4l5 4V5L8 9H4m5-2 6 6m0-6-6 6\"/>",
+    search: "<circle cx=\"10\" cy=\"10\" r=\"7\"/><path d=\"m15 15 6 6\"/>",
+    tray: "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M3 13h5l2 3h4l2-3h5\"/>",
+    add: "<path d=\"M12 5v14M5 12h14\"/>",
+    caret: "<path d=\"m6 15 6-6 6 6\"/>"
+};
+function glyph(type){
+  const path=svgPaths[type] || svgPaths.app;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
 }
+
 function toast(text,bad=false) {
   const el=$('toast'); el.textContent=text; el.className=`toast visible ${bad?'bad':''}`;
   clearTimeout(messageTimeout); messageTimeout=setTimeout(()=>el.classList.remove('visible'),4300);
@@ -37,7 +61,16 @@ function items(){
 function key(path){return (path||'').replaceAll('\\','/').split('/').pop().replace(/\.exe$/i,'').toLowerCase();}
 function findWindow(target){return running.find(w=>key(w.exe)===key(target))||null;}
 function appIcon(item){
-  const src=item.window?.icon || (item.target?.startsWith('data:image/')?item.target:null);
+  const target=item.window?.exe || item.target;
+  const src=item.window?.icon || cachedIcons.get(target) || (item.target?.startsWith('data:image/')?item.target:null);
+  if(!src && target && !pendingIcons.has(target) && !cachedIcons.has(target) &&
+      (target.includes('\\') || target.includes('/'))) {
+    pendingIcons.add(target);
+    api('icon_for_path',{target}).then(data=>{
+      cachedIcons.set(target,data || null);
+      if(data)renderDock();
+    }).catch(()=>cachedIcons.set(target,null)).finally(()=>pendingIcons.delete(target));
+  }
   return src ? `<img alt="" draggable="false" src="${htmlEscape(src)}"/>` : `<span class="glyph">${glyph(item.icon)}</span>`;
 }
 function badgeFor(item){const n=settings.attention?.[key(item.target)]||0;return n>0?`<span class="badge">${n>99?'99+':n}</span>`:'';}
@@ -109,7 +142,7 @@ function range(name,title,min,max,unit=''){return `<label class="range"><span>${
 function renderSettings(){
  const checked=(key)=>settings[key]?'checked':'';
  return `<div class="preferences">${range('iconSize','Tamanho dos ícones',36,72,' px')}
- ${range('opacity','Transparência do vidro',15,95,'%')}
+ ${range('opacity','Opacidade do vidro',6,90,'%')}
  ${range('bottomGap','Distância da borda',0,60,' px')}
  <label class="color-field">Cor de destaque <input type="color" data-setting="accent" value="${htmlEscape(settings.accent)}" /></label>
  <label class="switch"><input type="checkbox" data-setting="showRunning" ${checked('showRunning')}> Mostrar aplicativos abertos</label>

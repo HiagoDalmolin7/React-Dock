@@ -35,7 +35,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            icon_size: 50, opacity: 67, accent: "#b2bbff".into(), bottom_gap: 8,
+            icon_size: 50, opacity: 32, accent: "#b2bbff".into(), bottom_gap: 8,
             reduce_motion: false, show_running: true, show_clock: true, auto_start: false, tray_mode: "stable".into(), bridge_failures: 0,
             pinned: vec![
                 LaunchItem { id:"explorer".into(), name:"Arquivos".into(), target:"explorer.exe".into(), icon:"folder".into() },
@@ -85,7 +85,7 @@ pub fn validate(s:&mut Settings) {
     if s.tray_mode!="experimental" {s.tray_mode="stable".into();}
     s.bridge_failures=s.bridge_failures.min(3);
     s.icon_size=s.icon_size.clamp(36,72);
-    s.opacity=s.opacity.clamp(15,95);
+    s.opacity=s.opacity.clamp(6,90);
     s.bottom_gap=s.bottom_gap.clamp(0,60);
     if !s.accent.starts_with('#') || s.accent.len()!=7 || !s.accent[1..].bytes().all(|c|c.is_ascii_hexdigit()) {
         s.accent="#b2bbff".into();

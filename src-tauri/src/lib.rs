@@ -5,6 +5,7 @@ mod settings;
 
 use std::sync::Mutex;
 use tauri::{Manager, State, WebviewWindow};
+use tauri::menu::{Menu, MenuItem};
 
 struct AppState {
     settings: Mutex<settings::Settings>,
@@ -94,32 +95,81 @@ fn clear_attention(state:State<'_,AppState>,exe:String)->Result<(),String>{
     settings.attention.remove(&exe.to_lowercase());settings::save(&settings)
 }
 
+// Não forçar foco: a dock deve continuar visível sem roubar teclado do aplicativo.
+fn restore_dock(window: &WebviewWindow, focus: bool) {
+    if window.is_minimized().unwrap_or(false) { let _ = window.unminimize(); }
+    if !window.is_visible().unwrap_or(true) { let _ = window.show(); }
+    let _ = window.set_always_on_top(true);
+    if focus { let _ = window.set_focus(); }
+}
+
 pub fn run(){
     let mut saved=settings::load();settings::validate(&mut saved);
     let note=bridge::start_session(&mut saved);
     tauri::Builder::default()
+        // Deve ser o primeiro plugin: um segundo clique no EXE reabre a janela existente.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win)=app.get_webview_window("dock") {restore_dock(&win, true);}
+        }))
         .manage(AppState{settings:Mutex::new(saved),recovery_note:Mutex::new(note)})
         .setup(|app|{
             if let Some(win)=app.get_webview_window("dock") {
                 let gap=app.state::<AppState>().settings.lock().map(|s|s.bottom_gap).unwrap_or(8);
                 let _=reposition(&win,gap);
+                restore_dock(&win,false);
+                // Recuperação de composição/visibilidade: sem focar no usuário.
+                // Não esconde, minimiza nem cria outra janela.
+                let watch=win.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if watch.is_visible().is_err(){break;}
+                        if watch.is_minimized().unwrap_or(false) {let _=watch.unminimize();}
+                        if !watch.is_visible().unwrap_or(true){let _=watch.show();}
+                        // Não repetir a operação quando a janela já é topmost.
+                        if !watch.is_always_on_top().unwrap_or(true){let _=watch.set_always_on_top(true);}
+                    }
+                });
             }
             if let Some(icon)=app.default_window_icon().cloned() {
-                let _=tauri::tray::TrayIconBuilder::new()
+                let show=MenuItem::with_id(app,"show_dock","Mostrar React Dock",true,None::<&str>)?;
+                let quit=MenuItem::with_id(app,"quit_dock","Sair do React Dock",true,None::<&str>)?;
+                let menu=Menu::with_items(app,&[&show,&quit])?;
+                tauri::tray::TrayIconBuilder::new()
                     .icon(icon)
-                    .tooltip("React Dock • Clique para mostrar")
+                    .tooltip("React Dock • Sempre visível")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app,event|match event.id().as_ref(){
+                        "show_dock"=>{
+                            if let Some(win)=app.get_webview_window("dock"){restore_dock(&win,true);}
+                        }
+                        "quit_dock"=>{bridge::end_session();app.exit(0);}
+                        _=>{}
+                    })
                     .on_tray_icon_event(|tray,event|{
                         if let tauri::tray::TrayIconEvent::Click{..}=event {
-                            if let Some(window)=tray.app_handle().get_webview_window("dock") {
-                                let _=window.show();let _=window.set_focus();
+                            if let Some(win)=tray.app_handle().get_webview_window("dock"){
+                                restore_dock(&win,true);
                             }
                         }
-                    }).build(app);
+                    }).build(app)?;
             }
             Ok(())
         })
-        .on_window_event(|_,event|{
-            if let tauri::WindowEvent::Destroyed=event{bridge::end_session();}
+        .on_window_event(|window,event| match event {
+            tauri::WindowEvent::CloseRequested{api,..} => {
+                // Fechamento por engano não pode fazer a dock desaparecer.
+                api.prevent_close();
+                let _=window.show();
+                let _=window.set_always_on_top(true);
+            }
+            tauri::WindowEvent::Focused(false) => {
+                // Clicar em outro aplicativo não pode rebaixar a dock.
+                let _=window.set_always_on_top(true);
+            }
+            tauri::WindowEvent::Destroyed => bridge::end_session(),
+            _=>{}
         })
         .invoke_handler(tauri::generate_handler![
             get_settings, save_settings, windows_list, focus_window, launch, icon_for_path,

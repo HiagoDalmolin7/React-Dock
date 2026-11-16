@@ -21,6 +21,7 @@ extern "system" {
     fn keybd_event(vk:u8,scan:u8,flags:u32,extra:usize);
     fn DestroyIcon(icon:Handle)->i32;
     fn DrawIconEx(dc:Handle,x:i32,y:i32,icon:Handle,w:i32,h:i32,step:u32,brush:Handle,flags:u32)->i32;
+    fn PrivateExtractIconsW(filename:*const u16,index:i32,w:i32,h:i32,icons:*mut Handle,ids:*mut u32,count:u32,flags:u32)->u32;
 
 }
 #[link(name="kernel32")]
@@ -64,12 +65,6 @@ fn process_exe(pid:u32)->Option<String> {
     }
 }
 
-pub fn exe_for_hwnd(hwnd:isize)->Option<String> {
-    let mut pid=0;
-    unsafe {GetWindowThreadProcessId(hwnd as Handle,&mut pid);}
-    if pid==0 {None} else {process_exe(pid)}
-}
-
 struct WindowAccumulator(Vec<WindowItem>);
 unsafe extern "system" fn collect(hwnd:Handle,param:isize)->i32 {
     let output=&mut *(param as *mut WindowAccumulator);
@@ -102,10 +97,6 @@ pub fn windows_list()->Vec<WindowItem> {
         w.icon=image.clone();
     }
     out.0
-}
-
-pub fn foreground_exe()->Option<String> {
-    unsafe {let hwnd=GetForegroundWindow();if hwnd.is_null(){None}else{exe_for_hwnd(hwnd as isize)}}
 }
 
 pub fn focus_window(hwnd:&str)->Result<(),String>{
@@ -160,8 +151,16 @@ pub fn extract_icon(path:&str)->Option<String>{
 fn extract_icon_uncached(path:&str)->Option<String>{
     unsafe{
         let mut large:Handle=ptr::null_mut();
-        if ExtractIconExW(wide(path).as_ptr(),0,&mut large,ptr::null_mut(),1)==0 || large.is_null(){return None;}
-        const N:usize=48;
+        let mut resource_id=0u32;
+        // Preferir recurso de 256px, sem ampliar à força um bitmap de 32/48px.
+        // Caso a API não encontre esse ícone, usar extração tradicional.
+        let extracted=PrivateExtractIconsW(wide(path).as_ptr(),0,256,256,&mut large,&mut resource_id,1,0);
+        if extracted==0 || extracted==u32::MAX || large.is_null(){
+            large=ptr::null_mut();
+            if ExtractIconExW(wide(path).as_ptr(),0,&mut large,ptr::null_mut(),1)==0 || large.is_null(){return None;}
+        }
+        // 160px: excelente nitidez em telas HiDPI com ícones de 36-72px.
+        const N:usize=160;
         let dc=CreateCompatibleDC(ptr::null_mut());
         if dc.is_null(){DestroyIcon(large);return None;}
         let info=BitmapInfo{header:BitmapInfoHeader{size:40,width:N as i32,height:-(N as i32),planes:1,bit_count:32,compression:0,image_size:(N*N*4) as u32,xppm:0,yppm:0,clr_used:0,clr_important:0},color:[0]};
