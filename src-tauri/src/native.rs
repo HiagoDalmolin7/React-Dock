@@ -339,10 +339,10 @@ pub struct StartShortcut {pub name:String,pub target:String}
 pub fn start_shortcuts()->Vec<StartShortcut>{
     let mut roots=Vec::new();
     if let Some(appdata)=std::env::var_os("APPDATA"){
-        roots.push(std::path::PathBuf::from(appdata).join("Microsoft\Windows\Start Menu\Programs"));
+        roots.push(std::path::PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs"));
     }
     if let Some(programdata)=std::env::var_os("PROGRAMDATA"){
-        roots.push(std::path::PathBuf::from(programdata).join("Microsoft\Windows\Start Menu\Programs"));
+        roots.push(std::path::PathBuf::from(programdata).join(r"Microsoft\Windows\Start Menu\Programs"));
     }
     let mut result=Vec::new();
     let mut seen=std::collections::HashSet::new();

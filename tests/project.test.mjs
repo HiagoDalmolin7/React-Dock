@@ -202,3 +202,12 @@ test('Menu Iniciar lista atalhos locais com limite para não travar a interface'
  assert.match(native,/result\.len\(\)>=360/);
  assert.match(js,/api\('start_apps'\)/);
 });
+
+// Protege o cargo check de literais com barras invertidas não escapadas.
+test('Atalhos do Iniciar usam strings Rust raw para caminhos do Windows', () => {
+  const source = read('src-tauri/src/native.rs');
+  const correct = 'r"Microsoft\\Windows\\Start Menu\\Programs"';
+  const occurrences = source.split(correct).length - 1;
+  assert.equal(occurrences, 2, 'Os dois diretórios do Iniciar devem usar raw strings');
+  assert.doesNotMatch(source, /\.join\("Microsoft\\Windows\\Start Menu\\Programs"\)/);
+});
