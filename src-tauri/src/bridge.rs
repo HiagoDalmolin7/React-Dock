@@ -46,7 +46,7 @@ pub fn snapshot()->Result<Vec<TrayEntry>,String>{
     };
     if !state.success(){return Err("Extensão retornou erro".into());}
     let mut stdout=Vec::new();
-    if let Some(mut out)=child.stdout.take(){out.take(1024*1024).read_to_end(&mut stdout).map_err(|e|e.to_string())?;}
+    if let Some(out)=child.stdout.take(){out.take(1024*1024).read_to_end(&mut stdout).map_err(|e|e.to_string())?;}
     #[derive(Deserialize)] struct Response {version:u32,icons:Vec<TrayEntry>}
     let mut data:Response=serde_json::from_slice(&stdout).map_err(|_|"Resposta inválida da extensão")?;
     if data.version!=1 {return Err("Protocolo da extensão incompatível".into());}
