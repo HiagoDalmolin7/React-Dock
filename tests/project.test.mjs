@@ -73,5 +73,51 @@ test('Versões e workflow modernos sem Actions Node 20',()=>{
   assert.match(workflow,/upload-artifact@v7/);
   assert.match(workflow,/checkout@v7/);
   assert.match(workflow,/node-version: '24'/);
-  assert.equal(JSON.parse(read('src-tauri/tauri.conf.json')).version,'4.1.0');
+  assert.equal(JSON.parse(read('src-tauri/tauri.conf.json')).version,'4.2.0');
+});
+
+
+test('Menus e configurações em janela independente sem redimensionar a dock',()=>{
+ const c=JSON.parse(read('src-tauri/tauri.conf.json'));
+ assert.equal(c.app.windows.length,2);
+ assert.equal(c.app.windows[1].label,'panel');
+ assert.equal(c.app.windows[1].visible,false);
+ assert.equal(c.app.windows[1].transparent,true);
+ const js=read('src/main.js');
+ assert.match(js,/getCurrentWindow\(\)\.label === 'panel'/);
+ assert.match(js,/api\('show_panel'/);
+ assert.match(js,/get_panel_request/);
+ assert.match(read('src-tauri/src/lib.rs'),/fn reposition_panel\(/);
+ assert.match(read('src-tauri/src/lib.rs'),/fn hide_panel\(/);
+});
+test('A barra principal permanece fixa e detecta janelas rapidamente',()=>{
+ const js=read('src/main.js');
+ assert.match(js,/const height=116/);
+ assert.doesNotMatch(js,/opened\?550/);
+ assert.match(js,/setInterval\(refreshWindows,350\)/);
+ assert.match(js,/windowPollBusy/);
+ const native=read('src-tauri/src/native.rs');
+ assert.match(native,/Ícones são carregados sob demanda/);
+});
+test('Alternância da janela ativa com minimização',()=>{
+ assert.match(read('src/main.js'),/api\('toggle_window'/);
+ const native=read('src-tauri/src/native.rs');
+ assert.match(native,/pub fn toggle_window\(/);
+ assert.match(native,/IsIconic/);
+ assert.match(native,/ShowWindow\(handle,6\)/);
+});
+test('Prévia DWM nativa sem screenshot da área de trabalho',()=>{
+ const native=read('src-tauri/src/native.rs');
+ assert.match(native,/DwmRegisterThumbnail/);
+ assert.match(native,/DwmUpdateThumbnailProperties/);
+ assert.match(native,/DwmUnregisterThumbnail/);
+ const js=read('src/main.js');
+ assert.match(js,/show_window_preview/);
+ assert.match(js,/hide_window_preview/);
+});
+test('Composição transparente sem camada de gradiente nem backdrop filter na dock',()=>{
+ const css=read('src/style.css');
+ assert.match(css,/\.dock-frame \{[\s\S]*?background: rgba\(25,32,46,var\(--glass-opacity\)\) !important/);
+ assert.match(css,/backdrop-filter:none !important/);
+ assert.match(css,/\.glass-shine,\.glass-ambient \{ display:none/);
 });

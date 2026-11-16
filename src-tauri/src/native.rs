@@ -16,6 +16,12 @@ extern "system" {
     fn GetForegroundWindow()->Handle;
     fn GetWindowLongW(hwnd:Handle,index:i32)->i32;
     fn IsWindow(hwnd:Handle)->i32;
+    fn IsIconic(hwnd:Handle)->i32;
+    fn GetCursorPos(point:*mut Point)->i32;
+    fn MonitorFromPoint(point:Point,flags:u32)->Handle;
+    fn GetMonitorInfoW(monitor:Handle,info:*mut MonitorInfo)->i32;
+    fn CreateWindowExW(exstyle:u32,class:*const u16,name:*const u16,style:u32,x:i32,y:i32,width:i32,height:i32,parent:Handle,menu:Handle,instance:Handle,param:*const c_void)->Handle;
+    fn DestroyWindow(hwnd:Handle)->i32;
     fn ShowWindow(hwnd:Handle,cmd:i32)->i32;
     fn SetForegroundWindow(hwnd:Handle)->i32;
     fn keybd_event(vk:u8,scan:u8,flags:u32,extra:usize);
@@ -90,13 +96,21 @@ unsafe extern "system" fn collect(hwnd:Handle,param:isize)->i32 {
 pub fn windows_list()->Vec<WindowItem> {
     let mut out=WindowAccumulator(Vec::new());
     unsafe {EnumWindows(collect,&mut out as *mut WindowAccumulator as isize);}
-    // Extrai uma vez por executável e coloca em cache de memória.
-    let mut per_process=HashMap::<String,Option<String>>::new();
-    for w in &mut out.0 {
-        let image=per_process.entry(w.exe.to_ascii_lowercase()).or_insert_with(||extract_icon(&w.exe));
-        w.icon=image.clone();
-    }
+    // O levantamento de janelas deve ser leve. Ícones são carregados sob demanda pelo frontend.
     out.0
+}
+
+pub fn toggle_window(hwnd:&str,was_active:bool)->Result<(),String>{
+    let id=hwnd.parse::<usize>().map_err(|_|"Identificador de janela inválido")?;
+    unsafe {
+        let handle=id as Handle;
+        if IsWindow(handle)==0{return Err("A janela já foi fechada".into());}
+        if IsIconic(handle)==0 && (was_active || handle==GetForegroundWindow()){
+            ShowWindow(handle,6); // SW_MINIMIZE
+            return Ok(());
+        }
+    }
+    focus_window(hwnd)
 }
 
 pub fn focus_window(hwnd:&str)->Result<(),String>{
@@ -197,4 +211,62 @@ pub fn system_combo(letter:char)->Result<(),String>{
         keybd_event(0x5B,0,2,0);
     }
     Ok(())
+}
+
+
+// Prévia real de janelas por DWM. O helper não captura a tela e não injeta código em outros processos.
+// Uma janela nativa sem ativação hospeda o thumbnail, em vez de depender de screenshots WebView.
+#[repr(C)] #[derive(Clone,Copy,Default)] struct Rect {left:i32,top:i32,right:i32,bottom:i32}
+#[repr(C)] #[derive(Clone,Copy,Default)] struct Point {x:i32,y:i32}
+#[repr(C)] struct MonitorInfo {size:u32,monitor:Rect,work:Rect,flags:u32}
+#[repr(C)] struct ThumbSize {cx:i32,cy:i32}
+#[repr(C)] struct ThumbProps {flags:u32,dest:Rect,source:Rect,opacity:u8,visible:i32,client_only:i32}
+#[link(name="dwmapi")]
+extern "system" {
+    fn DwmRegisterThumbnail(destination:Handle,source:Handle,thumb:*mut Handle)->i32;
+    fn DwmUnregisterThumbnail(thumb:Handle)->i32;
+    fn DwmQueryThumbnailSourceSize(thumb:Handle,size:*mut ThumbSize)->i32;
+    fn DwmUpdateThumbnailProperties(thumb:Handle,props:*const ThumbProps)->i32;
+    fn DwmSetWindowAttribute(hwnd:Handle,attribute:u32,value:*const c_void,size:u32)->i32;
+}
+struct Preview {win:usize,thumb:usize}
+static PREVIEW:OnceLock<Mutex<Option<Preview>>>=OnceLock::new();
+fn preview_state()->&'static Mutex<Option<Preview>>{PREVIEW.get_or_init(||Mutex::new(None))}
+pub fn hide_preview(){
+    if let Ok(mut state)=preview_state().lock(){
+        if let Some(old)=state.take(){unsafe{
+            DwmUnregisterThumbnail(old.thumb as Handle);
+            DestroyWindow(old.win as Handle);
+        }}
+    }
+}
+pub fn show_preview(source:usize,dock_top:i32){
+    hide_preview();
+    unsafe {
+        if IsWindow(source as Handle)==0{return;}
+        const WIDTH:i32=320;const HEIGHT:i32=204;
+        let mut point=Point::default(); if GetCursorPos(&mut point)==0{return;}
+        let mut monitor=MonitorInfo{size:std::mem::size_of::<MonitorInfo>() as u32,monitor:Rect::default(),work:Rect::default(),flags:0};
+        let mon=MonitorFromPoint(point,2);
+        if mon.is_null() || GetMonitorInfoW(mon,&mut monitor)==0{return;}
+        let x=(point.x-WIDTH/2).clamp(monitor.work.left+8,(monitor.work.right-WIDTH-8).max(monitor.work.left+8));
+        let y=(dock_top-HEIGHT-11).clamp(monitor.work.top+8,(monitor.work.bottom-HEIGHT-8).max(monitor.work.top+8));
+        // WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT
+        let exstyle=0x00000008|0x00000080|0x08000000|0x00000020;
+        // WS_POPUP|WS_BORDER|SS_BLACKRECT: janela não clicável, sem barra de título.
+        let win=CreateWindowExW(exstyle,wide("STATIC").as_ptr(),ptr::null(),0x80000000|0x00800000|0x00000004,x,y,WIDTH,HEIGHT,ptr::null_mut(),ptr::null_mut(),ptr::null_mut(),ptr::null());
+        if win.is_null(){return;}
+        let corner:i32=2; let _=DwmSetWindowAttribute(win,33,&corner as *const _ as *const c_void,4);
+        let mut thumb:Handle=ptr::null_mut();
+        if DwmRegisterThumbnail(win,source as Handle,&mut thumb)!=0 || thumb.is_null(){DestroyWindow(win);return;}
+        let mut sz=ThumbSize{cx:WIDTH,cy:HEIGHT};let _=DwmQueryThumbnailSourceSize(thumb,&mut sz);
+        let aspect=if sz.cy>0 {(sz.cx.max(1) as f64)/(sz.cy as f64)} else {1.6};
+        let inner_w=((HEIGHT-12) as f64*aspect).round().clamp(1.0,(WIDTH-12) as f64) as i32;
+        let inner_h=((inner_w as f64)/aspect).round().clamp(1.0,(HEIGHT-12) as f64) as i32;
+        let left=(WIDTH-inner_w)/2;let top=(HEIGHT-inner_h)/2;
+        let props=ThumbProps{flags:0x1|0x4|0x8|0x10,dest:Rect{left,top,right:left+inner_w,bottom:top+inner_h},source:Rect::default(),opacity:255,visible:1,client_only:0};
+        if DwmUpdateThumbnailProperties(thumb,&props)!=0{DwmUnregisterThumbnail(thumb);DestroyWindow(win);return;}
+        ShowWindow(win,8); // SW_SHOWNA; não desvia o foco
+        if let Ok(mut state)=preview_state().lock(){*state=Some(Preview{win:win as usize,thumb:thumb as usize});}
+    }
 }

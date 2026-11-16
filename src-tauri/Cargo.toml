@@ -1,6 +1,6 @@
 [package]
 name = "react_dock"
-version = "4.1.0"
+version = "4.2.0"
 description = "React Dock Liquid Glass para Windows 11"
 authors = ["React Dock contributors"]
 license = "MIT"

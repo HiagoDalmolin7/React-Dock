@@ -1,7 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import './style.css';
 
 const $ = (id) => document.getElementById(id);
+const isPanel = getCurrentWindow().label === 'panel';
+document.body.classList.toggle('is-panel', isPanel);
+let panelSerial=-1, previewTimeout=null, windowPollBusy=false, lastExternalHwnd=null;
 const htmlEscape = (s='') => String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
 let settings, running = [], battery = null, bridge = null, bridgeIcons = [];
 let opened = '', currentEdit = '', messageTimeout = null, lastWinSignature='';
@@ -68,7 +72,7 @@ function appIcon(item){
     pendingIcons.add(target);
     api('icon_for_path',{target}).then(data=>{
       cachedIcons.set(target,data || null);
-      if(data)renderDock();
+      if(data){if(isPanel&&opened==='edit')renderPanel();else if(!isPanel)renderDock();}
     }).catch(()=>cachedIcons.set(target,null)).finally(()=>pendingIcons.delete(target));
   }
   return src ? `<img alt="" draggable="false" src="${htmlEscape(src)}"/>` : `<span class="glyph">${glyph(item.icon)}</span>`;
@@ -80,12 +84,25 @@ function dockApp(item,index){const active=item.window?.active;
   </button>`;
 }
 function renderDock(){
+  if(isPanel)return;
+  // Ao reconstruir os ícones, cancelar prévias associadas a elementos antigos.
+  if(previewTimeout!==null){clearTimeout(previewTimeout);previewTimeout=null;api('hide_window_preview').catch(()=>{});}
   const list=items();
   const apps=$('app-list');apps.innerHTML=list.map(dockApp).join('');
   apps.querySelectorAll('[data-item]').forEach(button=>{
     const item=list[Number(button.dataset.item)];
     button.addEventListener('click',()=>activateApp(item));
     button.addEventListener('contextmenu',e=>{e.preventDefault(); editApp(item);});
+    button.addEventListener('pointerenter',()=>{
+      clearTimeout(previewTimeout);
+      if(item.window?.hwnd){
+        previewTimeout=setTimeout(()=>api('show_window_preview',{hwnd:item.window.hwnd}).catch(()=>{}),260);
+      }
+    });
+    button.addEventListener('pointerleave',()=>{
+      clearTimeout(previewTimeout);previewTimeout=null;
+      api('hide_window_preview').catch(()=>{});
+    });
   });
   const clock=$('clock');clock.textContent=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
   clock.style.display=settings.showClock?'':'none';
@@ -96,14 +113,16 @@ function renderDock(){
 async function activateApp(item){
   try {
     const open=item.window||findWindow(item.target);
-    if(open) await api('focus_window',{hwnd:open.hwnd});
+    clearTimeout(previewTimeout);
+    await api('hide_window_preview').catch(()=>{});
+    if(open) await api('toggle_window',{hwnd:open.hwnd,wasActive:!!open.active || (lastExternalHwnd===open.hwnd && !running.some(w=>w.active))});
     else await api('launch',{target:item.target});
     if(settings.attention?.[key(item.target)]){await api('clear_attention',{exe:key(item.target)});delete settings.attention[key(item.target)];}
   }catch(err){toast(String(err),true);}
 }
 function renderPanel(){
   const panel=$('panel');panel.classList.toggle('hidden',!opened);
-  if(!opened){resize();return;}
+  if(!opened)return;
   const names={tray:'Bandeja personalizada',quick:'Controles rápidos',settings:'Aparência e preferências',edit:'Gerenciar aplicativo'};
   $('panel-title').textContent=names[opened]||'React Dock';
   $('tab-tray').classList.toggle('selected',opened==='tray');
@@ -114,7 +133,7 @@ function renderPanel(){
   if(opened==='quick') content.innerHTML=renderQuick();
   if(opened==='settings') content.innerHTML=renderSettings();
   if(opened==='edit') content.innerHTML=renderEdit();
-  installActions(content);resize();
+  installActions(content);
 }
 function renderTray(){
   return `<p class="help">Itens fixados por você. Adicione aplicativos, atalhos e painéis do Windows sem precisar abrir a bandeja original.</p>
@@ -158,7 +177,11 @@ function renderSettings(){
  <div class="form-row"><input id="new-pin-name" placeholder="Nome do app" maxlength="45"/><input id="new-pin-target" placeholder="Caminho do .exe ou atalho .lnk" maxlength="500"/><button class="action" data-add-pin>Fixar</button></div>
  </div>`;
 }
-function editApp(item){currentEdit=item?.target||'';opened='edit';renderPanel();}
+function editApp(item){
+  currentEdit=item?.target||'';
+  if(!isPanel){api('show_panel',{page:'edit',target:currentEdit}).catch(e=>toast(String(e),true));return;}
+  opened='edit';renderPanel();
+}
 function renderEdit(){
  const item=items().find(a=>a.target===currentEdit);
  if(!item)return '<p>O aplicativo não está mais disponível.</p>';
@@ -167,7 +190,7 @@ function renderEdit(){
  <button class="action" data-pin-current>${pinned?'Remover da dock':'Fixar na dock'}</button>
  <button class="secondary" data-tray-current>Adicionar à bandeja</button></div>`;
 }
-async function save(){try{settings=await api('save_settings',{value:settings});accent();renderDock();}catch(e){toast(String(e),true);}}
+async function save(){try{settings=await api('save_settings',{value:settings});accent();if(isPanel)renderPanel();else renderDock();}catch(e){toast(String(e),true);}}
 function installActions(el){
  el.querySelectorAll('[data-quick]').forEach(b=>b.addEventListener('click',async()=>{
    try{await api('quick_action',{action:b.dataset.quick});}catch(e){toast(String(e),true);}
@@ -219,16 +242,25 @@ function installActions(el){
    opened='tray';renderPanel();
  });
 }
-function open(name){opened=opened===name?'':name;renderPanel();}
+function open(name){
+  if(!isPanel){
+    clearTimeout(previewTimeout);
+    api('hide_window_preview').catch(()=>{});
+    api('show_panel',{page:name}).catch(e=>toast(String(e),true));
+    return;
+  }
+  opened=name;
+  renderPanel();
+}
 let layoutDebounce;
 function resize(){
- if(!settings)return;
+ if(!settings||isPanel)return;
  clearTimeout(layoutDebounce);
  layoutDebounce=setTimeout(async()=>{
    const apps=items().length;
    const dockWidth=Math.min(1450, Math.max(380, Math.ceil(apps*(settings.iconSize+12)+270)));
-   const width=Math.max(opened?620:0,dockWidth);
-   const height=opened?550:112;
+   const width=dockWidth;
+   const height=116;
    document.documentElement.style.setProperty('--dock-width',Math.max(345,dockWidth-22)+'px');
    try{await api('resize_dock',{width,height});}catch(e){console.warn('Posicionamento:',e);}
  },55);
@@ -247,36 +279,72 @@ function installMagnification(){
  dock.addEventListener('pointerleave',()=>dock.querySelectorAll('.app-icon').forEach(b=>b.style.setProperty('--magnify',1)));
 }
 async function refreshWindows(){
+ if(windowPollBusy)return;
+ windowPollBusy=true;
  try{
    const list=await api('windows_list');
    const signature=list.map(i=>`${i.hwnd}:${i.active}`).join('|');
    running=list;
-   if(signature!==lastWinSignature){lastWinSignature=signature;renderDock();}
- }catch(e){console.warn(e);}
+   const foreground=list.find(w=>w.active);if(foreground)lastExternalHwnd=foreground.hwnd;
+   if(signature!==lastWinSignature){lastWinSignature=signature;if(!isPanel)renderDock();else if(opened==='edit')renderPanel();}
+ }catch(e){console.warn(e);}finally{windowPollBusy=false;}
 }
 async function refreshBridge(){
  try{
    bridge=await api('get_bridge_status');
    if(bridge.mode==='experimental')bridgeIcons=await api('tray_snapshot');
  }catch(e){toast(String(e),true);bridge=await api('get_bridge_status').catch(()=>bridge);bridgeIcons=[];}
- if(opened==='tray'||opened==='settings')renderPanel();
+ if(isPanel&&(opened==='tray'||opened==='settings'))renderPanel();
+}
+async function checkPanelRequest(){
+  if(!isPanel)return;
+  try{
+    const request=await api('get_panel_request');
+    if(request.serial!==panelSerial){
+      panelSerial=request.serial;
+      opened=request.page;
+      currentEdit=request.target||'';
+      if(opened==='edit')await refreshWindows();
+      renderPanel();
+    }
+  }catch(e){console.warn('Painel:',e);}
+}
+async function syncSettings(){
+  if(isPanel)return;
+  try{
+    const next=await api('get_settings');
+    if(JSON.stringify(next)!==JSON.stringify(settings)){
+      settings=next;accent();renderDock();
+    }
+  }catch(e){console.warn(e);}
 }
 async function init(){
  settings=await api('get_settings');
  bridge=await api('get_bridge_status');
  battery=await api('battery_status');
- accent();renderDock();installMagnification();
+ accent();
+ if(isPanel){
+   // O painel é outra janela WebView: nenhum resize da dock ao abrir controles.
+   $('panel-close').addEventListener('click',()=>api('hide_panel').catch(e=>toast(String(e),true)));
+   $('tab-tray').addEventListener('click',()=>open('tray'));
+   $('tab-quick').addEventListener('click',()=>open('quick'));
+   $('tab-settings').addEventListener('click',()=>open('settings'));
+   await refreshBridge();
+   await checkPanelRequest();
+   setInterval(checkPanelRequest,140);
+   setInterval(refreshBridge,9000);
+   setInterval(async()=>{battery=await api('battery_status').catch(()=>battery);if(opened==='quick')renderPanel();},30000);
+   return;
+ }
+ renderDock();installMagnification();
  for(const [id,page] of [['open-tray','tray'],['open-quick','quick'],['open-settings','settings']])$(id).addEventListener('click',()=>open(page));
- $('panel-close').addEventListener('click',()=>{opened='';renderPanel();});
- $('tab-tray').addEventListener('click',()=>open('tray'));
- $('tab-quick').addEventListener('click',()=>open('quick'));
- $('tab-settings').addEventListener('click',()=>open('settings'));
  $('home-button').addEventListener('click',()=>api('launch',{target:'explorer.exe'}).catch(e=>toast(String(e),true)));
  await refreshWindows();
- setInterval(refreshWindows,2300);
+ // 350 ms para aplicativos abertos. Ícones são extraídos sob demanda e guardados em cache.
+ setInterval(refreshWindows,350);
+ setInterval(syncSettings,700);
  setInterval(async()=>{battery=await api('battery_status').catch(()=>battery);renderDock();},30000);
  setInterval(()=>{if(settings.showClock){$('clock').textContent=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});}},12000);
- setInterval(refreshBridge,7000);
  if(bridge.detail.includes('sessão anterior'))toast(bridge.detail,true);
 }
 init().catch(error=>{document.body.innerHTML=`<main class="fatal">Não foi possível iniciar a React Dock: ${htmlEscape(String(error))}</main>`;});

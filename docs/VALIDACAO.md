@@ -1,22 +1,23 @@
-# Validação da React Dock 4.1.0
+# Validação da React Dock 4.2.0
 
-## Testado neste ambiente
+## Verificações executadas
 
-- Sintaxe JavaScript: `node --check src/main.js` — sem erros.
-- `node --test tests/*.test.mjs` — 10 de 10 testes estáticos aprovados.
-- JSON da interface Tauri e do `package.json` — parse válido.
-- Arquivos ZIP (completo e apenas alterações) — verificação de integridade.
+- Sintaxe JavaScript: `node --check src/main.js` — aprovada.
+- Testes locais: `node --test tests/project.test.mjs` — **15 de 15** verificações de estrutura e regressão aprovadas.
+- JSON de Tauri, package.json e capability: leitura válida.
+- Integridade do pacote ZIP: verificação antes da entrega.
 
-## Ainda depende do GitHub Actions e de um Windows 11 real
+## Não validado neste ambiente
 
-- Compilar o Rust, o frontend atualizado para Vite 8 e o instalador NSIS.
-- Confirmar a persistência da dock quando outros aplicativos recebem foco.
-- Verificar transparência da janela e nitidez dos ícones em diferentes escalas DPI.
-- Testar prevenção de instâncias duplicadas e opção de sair pela bandeja.
+- `cargo check` / `cargo test` para o código Win32/Tauri revisado (a ferramenta Rust/Windows não está instalada neste ambiente).
+- Compilação de instalador e EXE no Windows, transparência da WebView2 e o resultado visual da miniatura DWM.
+- Funcionamento em monitores múltiplos, modos HDR, janelas de terceiros protegidas e aplicativos minimizados.
 
-## Observações técnicas
+## Pontos críticos da arquitetura
 
-- Os helpers sem uso `exe_for_hwnd` e `foreground_exe` foram removidos para eliminar os avisos `dead_code` do Rust.
-- `actions/checkout`, `actions/setup-node` e `actions/upload-artifact` foram atualizados para a série v7 com Node 24.
-- A versão 4.1.0 não utiliza efeito Acrylic nativo de janela inteira por segurança visual; o acabamento do vidro depende das camadas CSS.
-- O programa não utiliza hooks no Explorer por padrão, e as limitações das notificações/bandeja permanecem.
+- A janela `dock` nunca cresce para 550 px; `panel` usa uma WebView separada, inicialmente invisível.
+- A API `show_panel` atualiza o pedido de página; `get_panel_request` garante a navegação mesmo quando a página ainda está carregando.
+- A enumeração de janelas ficou rápida porque não converte ícones no processo de atualização. Ícones são buscados separadamente e cacheados.
+- `toggle_window` utiliza `IsIconic`, `ShowWindow(SW_MINIMIZE)` e `SetForegroundWindow`.
+- O preview usa `DwmRegisterThumbnail` / `DwmUpdateThumbnailProperties` e é removido quando o mouse sai; janelas não renderizáveis são ignoradas.
+- O modo experimental de bandeja permanece sem injeção no Explorer.

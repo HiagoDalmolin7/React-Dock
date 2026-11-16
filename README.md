@@ -1,37 +1,44 @@
-# React Dock 4.1.0 — correção de visibilidade e nitidez
+# React Dock 4.2.0 — menus estáveis, prévias e clique para minimizar
 
-Esta atualização prioriza a estabilidade ao trocar de aplicativo no Windows 11.
+Esta versão reorganiza a interface para resolver os problemas observados no Windows 11: o painel que não abria, a dock que desaparecia ao tocar nos controles, o retângulo de fundo, a demora para identificar aplicativos e a ausência de prévias/minimização.
 
-## O que mudou
+## Principais alterações
 
-- **Janela persistente:** sempre no topo, com checagem de visibilidade a cada dois segundos, sem roubar foco do programa em uso. Clicar nos aplicativos não deve ocultar a dock.
-- **Instância única:** o plugin oficial de instância única impede duplicações e restaura a janela existente ao abrir o EXE novamente.
-- **Fechamento seguro:** pedidos normais de fechamento são cancelados; para sair, use o menu de contexto do ícone do React Dock na bandeja do Windows.
-- **Transparência externa corrigida:** removido o efeito Acrylic em toda a janela e a opção de redirecionamento que podiam criar um retângulo opaco ou problemas de composição. Os elementos não desenhados da WebView permanecem transparentes.
-- **Ícones com mais definição:** tentativa de extrair 256 px, convertendo em PNG 160 px; ícones genéricos passam a ser SVGs vetoriais. Ícones de apps que só contenham versões 32/48 px ainda podem parecer suaves.
-- **Ferramentas modernas:** Rust estável, Tauri 2 estável, Node 24, GitHub Actions v7 e runner Windows 2025. Não migra para Tauri 3 alfa.
+- **Dock permanente e menu separado:** a barra principal permanece em uma janela transparente de 116 px de altura. Bandeja, configurações e controles rápidos usam uma **segunda janela** transparente, acima da barra. Não se amplia nem se substitui a janela principal ao abrir um menu.
+- **Configurações funcionais:** botões e abas passam a navegar pela janela de painel; botão fechar oculta apenas o painel, nunca a dock.
+- **Fundo mais limpo:** removidos os gradientes decorativos e o `backdrop-filter` da superfície principal que criavam uma camada retangular na composição do WebView2. O fundo externo continua transparente e a superfície arredondada usa cor uniforme com opacidade ajustável.
+- **Aplicativos mais responsivos:** a lista de janelas é consultada a cada **350 ms**, sem extrair/converter ícones a cada ciclo; imagens de aplicativos são carregadas sob demanda e ficam em cache.
+- **Clique para minimizar:** clicar num aplicativo que estava ativo o minimiza; clicar de novo o restaura e traz para frente. Com múltiplas janelas do mesmo executável, a versão atual ainda escolhe uma janela representativa.
+- **Prévia ao passar o mouse:** após um breve atraso, o Windows Desktop Window Manager tenta exibir uma miniatura viva numa pequena janela nativa, sem capturar a tela com permissões extras. Janelas protegidas, jogos exclusivos ou minimizados podem não fornecer conteúdo.
+- **Segurança preservada:** nenhuma DLL é injetada no Explorer; o modo hook experimental continua desligado. Instância única e a opção de encerrar pela bandeja foram mantidas.
+- **Ferramentas:** mantidas as versões estáveis utilizadas na 4.1.0 (Rust estável, Tauri 2, Node 24, GitHub Actions v7), evitando migrações para versões alfa.
 
-> **Limites:** a transparência ao redor da dock foi priorizada. O efeito CSS de vidro é semitransparente, mas não corresponde a um Acrylic nativo recortado, com desfoque real de outras janelas. Esse recurso requer uma composição nativa separada e testes no Windows. O modo topo não se sobrepõe à tela segura do Windows ou a alguns jogos em tela cheia exclusiva. Não foi possível testar essa versão em um computador Windows neste ambiente.
+> **Limitação importante:** esta revisão prioriza transparência sem retângulo e estabilidade. O **desfoque real do que está atrás** da superfície de vidro continua desativado; o acabamento é translúcido, mas não a refração óptica do Liquid Glass. Miniaturas DWM e o comportamento gráfico precisam de validação num Windows 11 real. Os testes automatizados de projeto não substituem o teste do aplicativo compilado.
 
-## Atualizar com GitHub Desktop
+## Como atualizar usando GitHub Desktop
 
-1. Faça *Fetch origin* / *Pull origin* no GitHub Desktop antes de substituir os arquivos.
-2. Extraia o ZIP da versão 4.1.0. Copie **o conteúdo extraído** para a pasta do repositório, substituindo arquivos; preserve `.git`.
-3. Clique em *Commit to main* e *Push origin*, ou use a pull request disponibilizada no GitHub.
-4. Acesse **Actions** e baixe o instalador/executável em *Artifacts* depois de uma compilação bem-sucedida.
-5. **Encerre todas as instâncias da versão antiga** (Gerenciador de Tarefas), depois instale/execute o novo programa para evitar que o processo 4.0 continue aberto.
+1. No GitHub Desktop, abra o repositório `HiagoDalmolin7/React-Dock` e use **Fetch origin** / **Pull origin** se estiver disponível.
+2. Extraia o ZIP **Somente alterações 4.2.0** e copie **o conteúdo das pastas** para a pasta local do repositório (`Repository → Show in Explorer`), permitindo substituir arquivos de nomes iguais. **Não toque na pasta `.git`**.
+3. Confira as alterações em GitHub Desktop, escreva `React Dock v4.2.0 - Menus, transparencia, previews e minimizacao` no campo **Summary**.
+4. Clique **Commit to main** e **Push origin**. Acompanhe a compilação em [GitHub Actions](https://github.com/HiagoDalmolin7/React-Dock/actions).
+5. Encerre a versão antiga pelo ícone da bandeja (**Sair do React Dock**) antes de instalar a nova. Se houver erro de compilação, envie o log completo da Action.
 
-## Recuperar ou sair
+## Checklist de teste no Windows 11
 
-- Abrir o executável de novo só deve focar a instância existente.
-- Clique no ícone do React Dock na bandeja do Windows para restaurar a dock.
-- Clique com o botão direito no ícone da bandeja e escolha **Sair do React Dock** para encerrar voluntariamente.
+1. Abra **Configurações**, **Bandeja** e **Controles rápidos**: o painel deve surgir **acima** da dock, sem a dock sumir.
+2. Feche o painel pelo `×` e abra de novo, alternando as abas.
+3. Abra o Explorador ou navegador: os ícones devem aparecer na dock em menos de aproximadamente um ciclo de atualização, sujeito ao tempo do próprio Windows.
+4. Com um programa na frente, clique em seu ícone para **minimizar**; clique outra vez para **restaurar**.
+5. Passe o mouse sobre o ícone de programa aberto: a prévia DWM deve tentar aparecer acima da dock.
+6. Teste a transparência com papel de parede claro e escuro; o retângulo externo não deve aparecer. O vidro interno deve ficar com uma cor uniforme.
+7. Abra as configurações de aparência, modifique cor/tamanho/opacidade e confirme que a dock permanece visível.
 
-## Validação
+## Validação local e limitações
 
-`npm test` verifica estrutura, janela, transparência, ícones e workflow; `npm run build` gera o frontend; `cargo check` e `npm run tauri -- build --bundles nsis` são executados pelo GitHub Actions.
+`node --check src/main.js` e `node --test tests/project.test.mjs` foram executados. A compilação nativa Rust/Tauri, geração do instalador e teste visual do DWM dependem do GitHub Actions e de um PC com Windows 11. A prévia falha de modo seguro se o Windows não permitir renderização.
 
 ---
+
 
 # React Dock — Liquid Glass para Windows 11
 
