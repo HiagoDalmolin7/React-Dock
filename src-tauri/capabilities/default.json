@@ -3,6 +3,7 @@
   "description": "Somente permissões necessárias para a janela da React Dock",
   "windows": [
     "dock",
+    "dock_*",
     "panel"
   ],
   "permissions": [

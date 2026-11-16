@@ -15,6 +15,18 @@ impl Default for LaunchItem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all="camelCase")]
+pub struct DisplayPreferences {
+    pub enabled: bool,
+    // 0 = largura adaptativa; 5..=100 = porcentagem da tela.
+    pub width_percent: u8,
+    pub bottom_gap: u32,
+}
+impl Default for DisplayPreferences {
+    fn default()->Self {Self{enabled:true,width_percent:0,bottom_gap:8}}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all="camelCase")]
 pub struct Settings {
     pub icon_size: u32,
     pub opacity: u8,
@@ -31,6 +43,7 @@ pub struct Settings {
     pub tray_hidden: Vec<String>,
     // Atenções do shell, não quantidade de mensagens não lidas.
     pub attention: HashMap<String, u32>,
+    pub monitors: HashMap<String,DisplayPreferences>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -46,7 +59,7 @@ impl Default for Settings {
                 LaunchItem { id:"security".into(), name:"Segurança".into(), target:"windowsdefender:".into(), icon:"shield".into() },
                 LaunchItem { id:"taskmgr".into(), name:"Gerenciador de tarefas".into(), target:"taskmgr.exe".into(), icon:"cpu".into() },
             ],
-            tray_hidden: vec![], attention: HashMap::new(),
+            tray_hidden: vec![], attention: HashMap::new(), monitors: HashMap::new(),
         }
     }
 }
@@ -94,4 +107,9 @@ pub fn validate(s:&mut Settings) {
     s.tray_pinned.truncate(40);
     s.tray_hidden.truncate(100);
     s.attention.retain(|_,v|*v>0);
+    if s.monitors.len()>24 {s.monitors.clear();}
+    for profile in s.monitors.values_mut(){
+        profile.width_percent=if profile.width_percent==0 {0} else {profile.width_percent.clamp(5,100)};
+        profile.bottom_gap=profile.bottom_gap.min(90);
+    }
 }

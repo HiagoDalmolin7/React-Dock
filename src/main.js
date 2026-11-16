@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import './style.css';
+import {buildDockItems, normalizeKey, dockWidth, waveAt} from './dock-model.mjs';
 
 const $ = (id) => document.getElementById(id);
 const isPanel = getCurrentWindow().label === 'panel';
@@ -9,7 +10,8 @@ let panelSerial=-1, previewTimeout=null, windowPollBusy=false, lastExternalHwnd=
 const htmlEscape = (s='') => String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
 let settings, running = [], battery = null, bridge = null, bridgeIcons = [];
 let opened = '', currentEdit = '', messageTimeout = null, lastWinSignature='';
-const cachedIcons = new Map(), pendingIcons = new Set();
+let displays=[], currentDisplay=null, quickDetail='', installedApps=[], startCurrentEntries=[];
+const cachedIcons = new Map(), pendingIcons = new Set(), retriedIcons = new Set();
 const api = (name, payload={}) => invoke(name,payload);
 
 const svgPaths={
@@ -53,35 +55,33 @@ function accent(){
   document.documentElement.style.setProperty('--icon-size',settings.iconSize+'px');
   document.body.classList.toggle('reduced',settings.reduceMotion);
 }
-function items(){
-  const pinned=settings.pinned.map(p=>({ ...p, pinned:true, window:findWindow(p.target) }));
-  if (!settings.showRunning) return pinned;
-  const matches=new Set(pinned.map(i=>key(i.target)));
-  const seen=new Set();
-  const additional=running.filter(w=>!matches.has(key(w.exe))&&!seen.has(key(w.exe))&&seen.add(key(w.exe)))
-    .map(w=>({id:'running:'+w.hwnd,name:w.process,target:w.exe,icon:'app',pinned:false,window:w}));
-  return [...pinned,...additional].slice(0,28);
-}
-function key(path){return (path||'').replaceAll('\\','/').split('/').pop().replace(/\.exe$/i,'').toLowerCase();}
+// Uma entrada por aplicativo e seleção de instâncias no painel próprio.
+function items(){return buildDockItems(settings.pinned,running,settings.showRunning);}
+const key=normalizeKey;
 function findWindow(target){return running.find(w=>key(w.exe)===key(target))||null;}
 function appIcon(item){
+  const iconKey=key(item.target);
+  // Uma identidade visual única mesmo quando o caminho do executável muda após iniciar.
+  const src=cachedIcons.get(iconKey)||null;
   const target=item.window?.exe || item.target;
-  const src=item.window?.icon || cachedIcons.get(target) || (item.target?.startsWith('data:image/')?item.target:null);
-  if(!src && target && !pendingIcons.has(target) && !cachedIcons.has(target) &&
-      (target.includes('\\') || target.includes('/'))) {
-    pendingIcons.add(target);
+  const needsRetry=cachedIcons.has(iconKey)&&cachedIcons.get(iconKey)===null&&item.window?.exe&&!retriedIcons.has(iconKey);
+  if((!cachedIcons.has(iconKey)||needsRetry) && !pendingIcons.has(iconKey) && target && !/^(ms-settings|https?|windowsdefender):/i.test(target)){
+    if(needsRetry)retriedIcons.add(iconKey);
+    pendingIcons.add(iconKey);
     api('icon_for_path',{target}).then(data=>{
-      cachedIcons.set(target,data || null);
-      if(data){if(isPanel&&opened==='edit')renderPanel();else if(!isPanel)renderDock();}
-    }).catch(()=>cachedIcons.set(target,null)).finally(()=>pendingIcons.delete(target));
+      cachedIcons.set(iconKey,data||null);
+      if(isPanel){if(opened==='edit'||opened==='windows')renderPanel();}
+      else renderDock();
+    }).catch(()=>cachedIcons.set(iconKey,null)).finally(()=>pendingIcons.delete(iconKey));
   }
   return src ? `<img alt="" draggable="false" src="${htmlEscape(src)}"/>` : `<span class="glyph">${glyph(item.icon)}</span>`;
 }
 function badgeFor(item){const n=settings.attention?.[key(item.target)]||0;return n>0?`<span class="badge">${n>99?'99+':n}</span>`:'';}
-function dockApp(item,index){const active=item.window?.active;
+function dockApp(item,index){
+  const active=item.window?.active, count=item.windows?.length||0;
   return `<button class="app-icon ${active?'active':''} ${settings.attention?.[key(item.target)]?'attention':''}" data-item="${index}" aria-label="${htmlEscape(item.name)}" title="${htmlEscape(item.name)}">
-    <div class="icon-art">${appIcon(item)}${badgeFor(item)}</div><i class="running-dot ${item.window?'running':''}"></i>
-  </button>`;
+    <div class="icon-art">${appIcon(item)}${badgeFor(item)}</div><i class="running-dot ${count?'running':''}"></i>
+    ${count>1?`<small class="instance-count">${count}</small>`:''}</button>`;
 }
 function renderDock(){
   if(isPanel)return;
@@ -91,7 +91,7 @@ function renderDock(){
   const apps=$('app-list');apps.innerHTML=list.map(dockApp).join('');
   apps.querySelectorAll('[data-item]').forEach(button=>{
     const item=list[Number(button.dataset.item)];
-    button.addEventListener('click',()=>activateApp(item));
+    button.addEventListener('click',()=>activateApp(item,button));
     button.addEventListener('contextmenu',e=>{e.preventDefault(); editApp(item);});
     button.addEventListener('pointerenter',()=>{
       clearTimeout(previewTimeout);
@@ -110,30 +110,49 @@ function renderDock(){
   $('battery-icon').textContent=battery?.charging?'ϟ':'▰';
   resize();
 }
-async function activateApp(item){
+async function activateApp(item,button){
   try {
-    const open=item.window||findWindow(item.target);
+    const windows=item.windows||[];
     clearTimeout(previewTimeout);
     await api('hide_window_preview').catch(()=>{});
-    if(open) await api('toggle_window',{hwnd:open.hwnd,wasActive:!!open.active || (lastExternalHwnd===open.hwnd && !running.some(w=>w.active))});
-    else await api('launch',{target:item.target});
+    if(windows.length>1){
+      await api('show_panel',{page:'windows',target:item.target});return;
+    }
+    const open=windows[0]||item.window||findWindow(item.target);
+    if(open){
+      // Anima o ícone em direção à sua posição; não manipula pixels da janela alheia.
+      if(button && !settings.reduceMotion && (open.active||lastExternalHwnd===open.hwnd)){
+        button.classList.add('icon-minimize');
+        await new Promise(resolve=>setTimeout(resolve,150));
+      }
+      await api('toggle_window',{hwnd:open.hwnd,wasActive:!!open.active || lastExternalHwnd===open.hwnd});
+      button?.classList.remove('icon-minimize');
+    } else {
+      button?.classList.add('icon-launch');
+      await api('launch',{target:item.target});
+      setTimeout(()=>button?.classList.remove('icon-launch'),400);
+    }
     if(settings.attention?.[key(item.target)]){await api('clear_attention',{exe:key(item.target)});delete settings.attention[key(item.target)];}
-  }catch(err){toast(String(err),true);}
+  }catch(err){button?.classList.remove('icon-minimize');toast(String(err),true);}
 }
 function renderPanel(){
   const panel=$('panel');panel.classList.toggle('hidden',!opened);
   if(!opened)return;
-  const names={tray:'Bandeja personalizada',quick:'Controles rápidos',settings:'Aparência e preferências',edit:'Gerenciar aplicativo'};
+  const names={tray:'Bandeja personalizada',quick:'Controles rápidos',settings:'Aparência e preferências',edit:'Gerenciar aplicativo',windows:'Janelas abertas',start:'Iniciar · React Dock'};
   $('panel-title').textContent=names[opened]||'React Dock';
+  document.body.classList.toggle('start-open',opened==='start');
   $('tab-tray').classList.toggle('selected',opened==='tray');
   $('tab-quick').classList.toggle('selected',opened==='quick');
   $('tab-settings').classList.toggle('selected',opened==='settings');
   const content=$('panel-body');
-  if(opened==='tray') content.innerHTML=renderTray();
-  if(opened==='quick') content.innerHTML=renderQuick();
-  if(opened==='settings') content.innerHTML=renderSettings();
-  if(opened==='edit') content.innerHTML=renderEdit();
+  if(opened==='tray')content.innerHTML=renderTray();
+  if(opened==='quick')content.innerHTML=renderQuick();
+  if(opened==='settings')content.innerHTML=renderSettings();
+  if(opened==='edit')content.innerHTML=renderEdit();
+  if(opened==='windows')content.innerHTML=renderWindows();
+  if(opened==='start')content.innerHTML=renderStart();
   installActions(content);
+  if(opened==='start')$('start-search')?.focus();
 }
 function renderTray(){
   return `<p class="help">Itens fixados por você. Adicione aplicativos, atalhos e painéis do Windows sem precisar abrir a bandeja original.</p>
@@ -151,28 +170,67 @@ function renderTray(){
 }
 const actions=[['wifi','Wi-Fi','wifi'],['bluetooth','Bluetooth','bluetooth'],['airplane','Modo avião','airplane'],['sound','Som','volume'],['notifications','Notificações','bell'],['focus','Não perturbe','moon'],['display','Tela','monitor'],['battery','Energia','battery']];
 function renderQuick(){
- return `<div class="tiles">${actions.map(([id,label,symbol])=>`<button data-quick="${id}" class="tile"><b>${glyph(symbol)}</b><span>${label}</span></button>`).join('')}</div>
- <div class="sound-controls"><div class="section-title">Volume do sistema</div><div class="volume-row"><button data-quick="volume-down">−</button><button data-quick="volume-mute">${glyph('mute')} Silenciar</button><button data-quick="volume-up">+</button></div></div>
- <div class="status-line"><strong>Bateria</strong><span>${battery?.percent!=null?battery.percent+'%'+(battery.charging?' · carregando':''):'Desktop / indisponível'}</span></div>
- <button class="secondary" data-quick="quick">Mostrar painel nativo completo (Win+A)</button>
- <p class="micro">Wi-Fi e Bluetooth abrem os respectivos controles oficiais do Windows; o volume é ajustado diretamente. Esta versão não simula estados de rádio não verificados.</p>`;
+ if(quickDetail){
+   const info={wifi:['Wi-Fi','wifi','Abrir as redes Wi-Fi do Windows'],bluetooth:['Bluetooth','bluetooth','Abrir dispositivos Bluetooth'],sound:['Volume','sound','Abrir o mixer de volume do Windows']};
+   const [label,action,description]=info[quickDetail]||info.sound;
+   return `<button class="secondary" data-quick-back>← Voltar</button><h3>${label}</h3><p class="help">${description}</p>
+     ${quickDetail==='sound'?'<div class="volume-row"><button data-quick="volume-down">− Volume</button><button data-quick="volume-mute">Silenciar</button><button data-quick="volume-up">+ Volume</button></div>':''}
+     <button class="action" data-quick="${action}">Abrir configuração oficial</button><p class="micro">A dock não inventa estados de Wi-Fi/Bluetooth: as opções detalhadas são administradas pelo Windows.</p>`;
+ }
+ return `<div class="tiles">
+   <button data-quick-detail="wifi" class="tile"><b>${glyph('wifi')}</b><span>Wi-Fi</span></button>
+   <button data-quick-detail="bluetooth" class="tile"><b>${glyph('bluetooth')}</b><span>Bluetooth</span></button>
+   <button data-quick-detail="sound" class="tile"><b>${glyph('volume')}</b><span>Volume</span></button>
+   ${actions.filter(a=>!['wifi','bluetooth','sound'].includes(a[0])).map(([id,label,symbol])=>`<button data-quick="${id}" class="tile"><b>${glyph(symbol)}</b><span>${label}</span></button>`).join('')}
+   </div><button class="secondary" data-quick="quick">Painel completo do Windows (Win+A)</button>`;
+}
+function renderWindows(){
+ const list=running.filter(w=>key(w.exe)===key(currentEdit));
+ return `<p class="help">${list.length} janela(s) deste programa. Escolha individualmente qual deseja ativar ou minimizar.</p>
+ <div class="window-picker">${list.map(w=>`<div class="window-line"><span>${glyph('monitor')} ${htmlEscape(w.title)}</span>
+ <div><button class="secondary" data-window-focus="${w.hwnd}">Abrir</button><button class="secondary" data-window-min="${w.hwnd}">Minimizar</button></div></div>`).join('')||'<p>Não há janelas abertas.</p>'}</div>`;
+}
+function startEntries(){
+ const seen=new Set();
+ return [...settings.pinned,...settings.trayPinned,...running.map(w=>({name:w.process,target:w.exe,icon:'app'})),...installedApps.map(p=>({...p,icon:'app',catalog:true}))].filter(i=>{
+   const k=key(i.target);if(seen.has(k))return false;seen.add(k);return true;
+ });
+}
+function renderStart(){
+ const entries=startEntries();startCurrentEntries=entries;
+ return `<div class="start-search-row">${glyph('search')}<input id="start-search" placeholder="Pesquisar programas..." autocomplete="off"/></div>
+ <div class="section-title">Aplicativos</div><div class="start-grid">${entries.map((p,i)=>`<button class="start-item" data-start-target="${i}" data-search="${htmlEscape(p.name.toLowerCase())}">${p.catalog?`<span class="glyph">${glyph('app')}</span>`:appIcon({...p,window:findWindow(p.target)})}<span>${htmlEscape(p.name)}</span></button>`).join('')}</div>
+ <div class="section-title">Atalhos do Windows</div><div class="button-row"><button class="secondary" data-start-system="explorer.exe">Arquivos</button><button class="secondary" data-start-system="ms-settings:">Configurações</button><button class="secondary" data-start-system="taskmgr.exe">Gerenciador</button></div>
+ <p class="micro">Iniciar personalizado: ícone do Windows na dock ou Ctrl+Alt+Espaço em qualquer aplicativo. A tecla Windows isolada permanece com o Iniciar original.</p>`;
 }
 function range(name,title,min,max,unit=''){return `<label class="range"><span>${title}<strong id="v-${name}">${settings[name]}${unit}</strong></span><input type="range" min="${min}" max="${max}" value="${settings[name]}" data-setting="${name}" data-unit="${unit}" /></label>`;}
 function renderSettings(){
  const checked=(key)=>settings[key]?'checked':'';
- return `<div class="preferences">${range('iconSize','Tamanho dos ícones',36,72,' px')}
+ return `<div class="preferences">
+ ${range('iconSize','Tamanho dos ícones',36,72,' px')}
  ${range('opacity','Opacidade do vidro',6,90,'%')}
- ${range('bottomGap','Distância da borda',0,60,' px')}
  <label class="color-field">Cor de destaque <input type="color" data-setting="accent" value="${htmlEscape(settings.accent)}" /></label>
  <label class="switch"><input type="checkbox" data-setting="showRunning" ${checked('showRunning')}> Mostrar aplicativos abertos</label>
  <label class="switch"><input type="checkbox" data-setting="showClock" ${checked('showClock')}> Mostrar relógio</label>
  <label class="switch"><input type="checkbox" data-setting="reduceMotion" ${checked('reduceMotion')}> Reduzir animações</label>
- <hr/>
- <div class="section-title">Captura experimental da bandeja</div><p class="help">O modo estável não injeta código no Explorer. O modo experimental só pode ser ativado quando um auxiliar compatível for instalado separadamente.</p>
+ <hr/><div class="section-title">Monitores</div>
+ <p class="help">Configurações independentes de visibilidade, largura e posição por tela. Largura 0% = automática; 100% = comprimento completo.</p>
+ ${displays.map(d=>{
+   const p=settings.monitors?.[d.key]||{enabled:true,widthPercent:0,bottomGap:8};
+   const id=htmlEscape(d.key);
+   return `<div class="monitor-pref"><strong>${htmlEscape(d.name)} · ${d.logicalWidth}px</strong>
+   <label class="switch"><input type="checkbox" data-display-setting="enabled" data-display-key="${id}" ${p.enabled?'checked':''}> Mostrar dock neste monitor</label>
+   <label class="range"><span>Largura <strong class="display-value">${p.widthPercent?p.widthPercent+'%':'Automática'}</strong></span><input type="range" min="0" max="100" step="5" data-display-setting="widthPercent" data-display-key="${id}" value="${p.widthPercent}"/></label>
+   <label class="range"><span>Distância inferior <strong class="display-value">${p.bottomGap} px</strong></span><input type="range" min="0" max="90" data-display-setting="bottomGap" data-display-key="${id}" value="${p.bottomGap}"/></label></div>`;
+ }).join('')}
+ <hr/><div class="section-title">Encerrar programa</div>
+ <p class="help">Use este botão para fechar completamente o React Dock, independentemente do ícone na bandeja nativa.</p>
+ <button class="danger" data-quit>Encerrar React Dock</button>
+ <hr/><div class="section-title">Bandeja experimental</div>
+ <p class="help">A extensão do Explorer continua opcional, desativada por padrão, e depende de um auxiliar externo.</p>
  <div class="status-line"><span class="status ${bridge?.mode==='experimental'?'warn':''}">${bridge?.mode==='experimental'?'Experimental':'Estável'}</span><span>${htmlEscape(bridge?.detail||'')}</span></div>
- <div class="button-row"><button class="secondary" data-mode="stable">Usar estável</button><button class="action" data-mode="experimental" ${bridge?.available?'':'disabled title="Extensão não instalada"'}>Ativar experimental</button></div>
- <p class="micro">Desativa após três falhas ou na próxima inicialização após fechamento anormal. Não impede uma falha inicial do Explorer causada por extensões externas.</p>
- <div class="section-title">Aplicativos fixados</div>
+ <div class="button-row"><button class="secondary" data-mode="stable">Usar estável</button><button class="action" data-mode="experimental" ${bridge?.available?'':'disabled'}>Ativar experimental</button></div>
+ <hr/><div class="section-title">Aplicativos fixados</div>
  <div class="pinned-editor">${settings.pinned.map((p,i)=>`<div class="pin-line"><span>${glyph(p.icon)} ${htmlEscape(p.name)}</span><div><button class="tiny" data-up-pin="${i}" title="Mover à esquerda">←</button><button class="tiny" data-remove-pin="${i}" title="Remover">×</button></div></div>`).join('')}</div>
  <div class="form-row"><input id="new-pin-name" placeholder="Nome do app" maxlength="45"/><input id="new-pin-target" placeholder="Caminho do .exe ou atalho .lnk" maxlength="500"/><button class="action" data-add-pin>Fixar</button></div>
  </div>`;
@@ -190,8 +248,42 @@ function renderEdit(){
  <button class="action" data-pin-current>${pinned?'Remover da dock':'Fixar na dock'}</button>
  <button class="secondary" data-tray-current>Adicionar à bandeja</button></div>`;
 }
-async function save(){try{settings=await api('save_settings',{value:settings});accent();if(isPanel)renderPanel();else renderDock();}catch(e){toast(String(e),true);}}
+async function save(){try{settings=await api('save_settings',{value:settings});accent();if(isPanel){if(opened!=='settings')renderPanel();}else renderDock();}catch(e){toast(String(e),true);}}
 function installActions(el){
+ el.querySelectorAll('[data-quick-detail]').forEach(b=>b.addEventListener('click',()=>{quickDetail=b.dataset.quickDetail;renderPanel();}));
+ el.querySelector('[data-quick-back]')?.addEventListener('click',()=>{quickDetail='';renderPanel();});
+ el.querySelector('[data-quit]')?.addEventListener('click',()=>api('quit_app').catch(e=>toast(String(e),true)));
+ el.querySelectorAll('[data-display-setting]').forEach(input=>input.addEventListener(input.type==='checkbox'?'change':'input',()=>{
+   const key=input.dataset.displayKey;
+   settings.monitors||={};settings.monitors[key]||={enabled:true,widthPercent:0,bottomGap:8};
+   const field=input.dataset.displaySetting;
+   settings.monitors[key][field]=input.type==='checkbox'?input.checked:Number(input.value);
+   const val=input.closest('label')?.querySelector('.display-value');
+   if(val)val.textContent=field==='widthPercent'?(Number(input.value)?input.value+'%':'Automática'):input.value+' px';
+   clearTimeout(window.displayPreferenceDebounce);window.displayPreferenceDebounce=setTimeout(save,260);
+ }));
+ el.querySelectorAll('[data-window-focus]').forEach(b=>b.addEventListener('click',async()=>{
+   await api('focus_window',{hwnd:b.dataset.windowFocus}).catch(e=>toast(String(e),true));
+   await api('hide_panel').catch(()=>{});
+ }));
+ el.querySelectorAll('[data-window-min]').forEach(b=>b.addEventListener('click',async()=>{
+   await api('toggle_window',{hwnd:b.dataset.windowMin,wasActive:true}).catch(e=>toast(String(e),true));
+   await api('hide_panel').catch(()=>{});
+ }));
+ el.querySelectorAll('[data-start-target]').forEach(b=>b.addEventListener('click',async()=>{
+   const p=startCurrentEntries[Number(b.dataset.startTarget)];if(!p)return;
+   const win=findWindow(p.target);
+   await api(win?'focus_window':'launch',win?{hwnd:win.hwnd}:{target:p.target}).catch(e=>toast(String(e),true));
+   await api('hide_panel').catch(()=>{});
+ }));
+ el.querySelectorAll('[data-start-system]').forEach(b=>b.addEventListener('click',async()=>{
+   await api('launch',{target:b.dataset.startSystem}).catch(e=>toast(String(e),true));
+   await api('hide_panel').catch(()=>{});
+ }));
+ el.querySelector('#start-search')?.addEventListener('input',e=>{
+   const q=e.target.value.trim().toLowerCase();
+   el.querySelectorAll('[data-start-target]').forEach(b=>b.hidden=!b.dataset.search.includes(q));
+ });
  el.querySelectorAll('[data-quick]').forEach(b=>b.addEventListener('click',async()=>{
    try{await api('quick_action',{action:b.dataset.quick});}catch(e){toast(String(e),true);}
  }));
@@ -250,33 +342,35 @@ function open(name){
     return;
   }
   opened=name;
+  if(name==='quick')quickDetail='';
   renderPanel();
 }
 let layoutDebounce;
 function resize(){
- if(!settings||isPanel)return;
+ if(!settings||isPanel||!currentDisplay)return;
  clearTimeout(layoutDebounce);
  layoutDebounce=setTimeout(async()=>{
-   const apps=items().length;
-   const dockWidth=Math.min(1450, Math.max(380, Math.ceil(apps*(settings.iconSize+12)+270)));
-   const width=dockWidth;
-   const height=116;
-   document.documentElement.style.setProperty('--dock-width',Math.max(345,dockWidth-22)+'px');
-   try{await api('resize_dock',{width,height});}catch(e){console.warn('Posicionamento:',e);}
- },55);
+   const available=Math.max(300,currentDisplay.logicalWidth-12);
+   const profile=settings.monitors?.[currentDisplay.key]||{widthPercent:0};
+   const width=dockWidth(items().length,settings.iconSize,available+12,profile.widthPercent);
+   document.documentElement.style.setProperty('--dock-width',Math.max(250,width-18)+'px');
+   try{await api('resize_dock',{width,height:116});}catch(e){console.warn('Posicionamento:',e);}
+ },50);
 }
 function installMagnification(){
- const dock=$('app-list');
+ const dock=$('dock-frame');
  dock.addEventListener('pointermove',event=>{
    if(settings.reduceMotion)return;
    dock.querySelectorAll('.app-icon').forEach(btn=>{
-     const rect=btn.getBoundingClientRect(),center=rect.left+rect.width/2;
-     const d=Math.abs(event.clientX-center);
-     const scale=1+0.3*Math.max(0,1-d/140);
+     const rect=btn.getBoundingClientRect(),cx=rect.left+rect.width/2,cy=rect.top+rect.height*.65;
+     const {scale,lift:rise}=waveAt(event.clientX-cx,event.clientY-cy);
      btn.style.setProperty('--magnify',scale.toFixed(3));
+     btn.style.setProperty('--lift',Math.min(30,rise).toFixed(1)+'px');
    });
  });
- dock.addEventListener('pointerleave',()=>dock.querySelectorAll('.app-icon').forEach(b=>b.style.setProperty('--magnify',1)));
+ dock.addEventListener('pointerleave',()=>dock.querySelectorAll('.app-icon').forEach(btn=>{
+   btn.style.setProperty('--magnify',1);btn.style.setProperty('--lift','0px');
+ }));
 }
 async function refreshWindows(){
  if(windowPollBusy)return;
@@ -286,7 +380,7 @@ async function refreshWindows(){
    const signature=list.map(i=>`${i.hwnd}:${i.active}`).join('|');
    running=list;
    const foreground=list.find(w=>w.active);if(foreground)lastExternalHwnd=foreground.hwnd;
-   if(signature!==lastWinSignature){lastWinSignature=signature;if(!isPanel)renderDock();else if(opened==='edit')renderPanel();}
+   if(signature!==lastWinSignature){lastWinSignature=signature;if(!isPanel)renderDock();else if(opened==='edit'||opened==='windows')renderPanel();}
  }catch(e){console.warn(e);}finally{windowPollBusy=false;}
 }
 async function refreshBridge(){
@@ -304,7 +398,10 @@ async function checkPanelRequest(){
       panelSerial=request.serial;
       opened=request.page;
       currentEdit=request.target||'';
-      if(opened==='edit')await refreshWindows();
+      if(opened==='edit'||opened==='windows'||opened==='start')await refreshWindows();
+      if(opened==='start' && !installedApps.length){
+        installedApps=await api('start_apps').catch(()=>[]);
+      }
       renderPanel();
     }
   }catch(e){console.warn('Painel:',e);}
@@ -320,6 +417,8 @@ async function syncSettings(){
 }
 async function init(){
  settings=await api('get_settings');
+ displays=await api('get_displays');
+ if(!isPanel)currentDisplay=await api('current_display');
  bridge=await api('get_bridge_status');
  battery=await api('battery_status');
  accent();
@@ -338,7 +437,7 @@ async function init(){
  }
  renderDock();installMagnification();
  for(const [id,page] of [['open-tray','tray'],['open-quick','quick'],['open-settings','settings']])$(id).addEventListener('click',()=>open(page));
- $('home-button').addEventListener('click',()=>api('launch',{target:'explorer.exe'}).catch(e=>toast(String(e),true)));
+ $('home-button').addEventListener('click',()=>open('start'));
  await refreshWindows();
  // 350 ms para aplicativos abertos. Ícones são extraídos sob demanda e guardados em cache.
  setInterval(refreshWindows,350);

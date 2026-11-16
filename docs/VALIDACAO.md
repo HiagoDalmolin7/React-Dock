@@ -1,23 +1,26 @@
-# Validação da React Dock 4.2.0
+# Validação React Dock 4.3.0
 
-## Verificações executadas
+## Realizado neste ambiente
 
-- Sintaxe JavaScript: `node --check src/main.js` — aprovada.
-- Testes locais: `node --test tests/project.test.mjs` — **15 de 15** verificações de estrutura e regressão aprovadas.
-- JSON de Tauri, package.json e capability: leitura válida.
-- Integridade do pacote ZIP: verificação antes da entrega.
+- [x] Verificação de sintaxe do frontend com `node --check`.
+- [x] 24 testes JavaScript/estruturais, incluindo testes de modelo puro para agrupamento por executável, larguras e wave vertical.
+- [x] Validação de JSON para configuração, package e permissões do Tauri.
+- [x] Inspeção dos pacotes ZIP e preservação das pastas ocultas `.github`.
 
-## Não validado neste ambiente
+## Ainda não comprovado
 
-- `cargo check` / `cargo test` para o código Win32/Tauri revisado (a ferramenta Rust/Windows não está instalada neste ambiente).
-- Compilação de instalador e EXE no Windows, transparência da WebView2 e o resultado visual da miniatura DWM.
-- Funcionamento em monitores múltiplos, modos HDR, janelas de terceiros protegidas e aplicativos minimizados.
+- [ ] Compilação Rust em Windows x64 com Tauri 2, incluindo criação de WebViews por monitor e funções Win32.
+- [ ] Execução das docks em dois ou mais monitores com fatores DPI diferentes.
+- [ ] Ausência de retângulo externo no WebView2 da máquina do usuário.
+- [ ] Abre e fecha menu de bandeja em clique esquerdo e direito.
+- [ ] Encerramento via Configurações e não reabertura por watchdog.
+- [ ] Abrir e minimizar várias janelas do mesmo executável pelo seletor.
+- [ ] Lista de atalhos do Iniciar e atalho global Ctrl+Alt+Espaço.
+- [ ] Fixar/desafixar e consistência dos ícones de Explorer/Edge.
+- [ ] Configurações rápidas e wave na direção vertical.
 
-## Pontos críticos da arquitetura
+## Limitações intencionais
 
-- A janela `dock` nunca cresce para 550 px; `panel` usa uma WebView separada, inicialmente invisível.
-- A API `show_panel` atualiza o pedido de página; `get_panel_request` garante a navegação mesmo quando a página ainda está carregando.
-- A enumeração de janelas ficou rápida porque não converte ícones no processo de atualização. Ícones são buscados separadamente e cacheados.
-- `toggle_window` utiliza `IsIconic`, `ShowWindow(SW_MINIMIZE)` e `SetForegroundWindow`.
-- O preview usa `DwmRegisterThumbnail` / `DwmUpdateThumbnailProperties` e é removido quando o mouse sai; janelas não renderizáveis são ignoradas.
-- O modo experimental de bandeja permanece sem injeção no Explorer.
+Tecla Windows **isolada** não substituída: o atalho global implementado é Ctrl+Alt+Espaço. A animação de minimização atual é somente sobre o ícone, não sobre a janela nativa do aplicativo. Sem desfoque real do desktop. Monitores adicionados/removidos exigem reiniciar o programa.
+
+Se a Action falhar, encaminhar o log completo da primeira falha `error[E...]` ou `error:` e o trecho do arquivo que ela aponta.

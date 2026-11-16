@@ -16,6 +16,7 @@ extern "system" {
     fn GetForegroundWindow()->Handle;
     fn GetWindowLongW(hwnd:Handle,index:i32)->i32;
     fn IsWindow(hwnd:Handle)->i32;
+    fn GetWindow(hwnd:Handle,command:u32)->Handle;
     fn IsIconic(hwnd:Handle)->i32;
     fn GetCursorPos(point:*mut Point)->i32;
     fn MonitorFromPoint(point:Point,flags:u32)->Handle;
@@ -36,6 +37,7 @@ extern "system" {
     fn CloseHandle(h:Handle)->i32;
     fn QueryFullProcessImageNameW(h:Handle,flags:u32,filename:*mut u16,size:*mut u32)->i32;
     fn GetSystemPowerStatus(status:*mut SystemPowerStatus)->i32;
+    fn SearchPathW(path:*const u16,file:*const u16,ext:*const u16,capacity:u32,buf:*mut u16,part:*mut *mut u16)->u32;
 }
 #[link(name="shell32")]
 extern "system" {
@@ -77,6 +79,10 @@ unsafe extern "system" fn collect(hwnd:Handle,param:isize)->i32 {
     if IsWindowVisible(hwnd)==0 || hwnd==GetForegroundWindow() && GetWindowTextLengthW(hwnd)==0 {return 1;}
     let exstyle=GetWindowLongW(hwnd,-20) as u32;
     if exstyle & 0x00000080 !=0 {return 1;} // WS_EX_TOOLWINDOW
+    // Evita janelas auxiliares que não aparecem na barra de tarefas do Windows.
+    if !GetWindow(hwnd,4).is_null() && exstyle & 0x00040000 == 0 {return 1;} // GW_OWNER, WS_EX_APPWINDOW
+    let mut cloaked=0u32;
+    if DwmGetWindowAttribute(hwnd,14,&mut cloaked as *mut _ as *mut c_void,4)==0 && cloaked!=0 {return 1;}
     let len=GetWindowTextLengthW(hwnd);
     if len<=0 || len>4096{return 1;}
     let mut chars=vec![0u16;(len+1) as usize];
@@ -85,9 +91,12 @@ unsafe extern "system" fn collect(hwnd:Handle,param:isize)->i32 {
     let mut pid=0;GetWindowThreadProcessId(hwnd,&mut pid);
     let Some(exe)=process_exe(pid) else{return 1;};
     let name=std::path::Path::new(&exe).file_stem().and_then(|s|s.to_str()).unwrap_or("Aplicativo").to_string();
-    if name.eq_ignore_ascii_case("react_dock") || name.eq_ignore_ascii_case("novadock") {return 1;}
+    const SHELL_HELPERS:&[&str]=&["react_dock","novadock","textinputhost","ctfmon","searchhost","searchapp","startmenuexperiencehost","shellexperiencehost","lockapp","widgets","widgetservice","runtimebroker","sihost","screenclippinghost","systemsettingsbroker"];
+    if SHELL_HELPERS.iter().any(|n|name.eq_ignore_ascii_case(n)) {return 1;}
+    let title=String::from_utf16_lossy(&chars[..got as usize]);
+    if title.eq_ignore_ascii_case("Microsoft Text Input Application") {return 1;}
     output.0.push(WindowItem {
-        hwnd:(hwnd as usize).to_string(),title:String::from_utf16_lossy(&chars[..got as usize]),
+        hwnd:(hwnd as usize).to_string(),title,
         exe,process:name,active:hwnd==GetForegroundWindow(),icon:None,
     });
     1
@@ -154,12 +163,36 @@ pub fn battery()->Battery{
 // Icon.ExtractAssociatedIcon não está disponível diretamente no Rust.
 // ExtractIconExW + DrawIconEx grava a imagem diretamente numa DIB RGBA.
 static ICONS:OnceLock<Mutex<HashMap<String,Option<String>>>>=OnceLock::new();
+fn resolve_icon_path(path:&str)->Option<String>{
+    if std::path::Path::new(path).is_file(){return Some(path.into());}
+    if path.contains(':') || path.contains('\\') || path.contains('/') {return None;}
+    if path.eq_ignore_ascii_case("explorer.exe") {
+        if let Some(windows)=std::env::var_os("WINDIR") {
+            let candidate=std::path::Path::new(&windows).join("explorer.exe");
+            if candidate.is_file(){return Some(candidate.to_string_lossy().into_owned());}
+        }
+    }
+    if path.eq_ignore_ascii_case("msedge.exe") {
+        for env in ["PROGRAMFILES(X86)","PROGRAMFILES"] {
+            if let Some(root)=std::env::var_os(env) {
+                let candidate=std::path::Path::new(&root).join("Microsoft\\Edge\\Application\\msedge.exe");
+                if candidate.is_file(){return Some(candidate.to_string_lossy().into_owned());}
+            }
+        }
+    }
+    unsafe{
+        let mut buf=vec![0u16;32768];
+        let n=SearchPathW(ptr::null(),wide(path).as_ptr(),ptr::null(),buf.len() as u32,buf.as_mut_ptr(),ptr::null_mut());
+        if n>0 && (n as usize)<buf.len(){return Some(String::from_utf16_lossy(&buf[..n as usize]));}
+    }
+    None
+}
 pub fn extract_icon(path:&str)->Option<String>{
-    if !std::path::Path::new(path).exists(){return None;}
+    let file=resolve_icon_path(path)?;
     let cache=ICONS.get_or_init(||Mutex::new(HashMap::new()));
-    if let Ok(guard)=cache.lock(){if let Some(cached)=guard.get(path){return cached.clone();}}
-    let result=extract_icon_uncached(path);
-    if let Ok(mut guard)=cache.lock(){if guard.len()>180{guard.clear();} guard.insert(path.to_string(),result.clone());}
+    if let Ok(guard)=cache.lock(){if let Some(cached)=guard.get(&file){return cached.clone();}}
+    let result=extract_icon_uncached(&file);
+    if let Ok(mut guard)=cache.lock(){if guard.len()>180{guard.clear();} guard.insert(file,result.clone());}
     result
 }
 fn extract_icon_uncached(path:&str)->Option<String>{
@@ -223,6 +256,7 @@ pub fn system_combo(letter:char)->Result<(),String>{
 #[repr(C)] struct ThumbProps {flags:u32,dest:Rect,source:Rect,opacity:u8,visible:i32,client_only:i32}
 #[link(name="dwmapi")]
 extern "system" {
+    fn DwmGetWindowAttribute(hwnd:Handle,attribute:u32,value:*mut c_void,size:u32)->i32;
     fn DwmRegisterThumbnail(destination:Handle,source:Handle,thumb:*mut Handle)->i32;
     fn DwmUnregisterThumbnail(thumb:Handle)->i32;
     fn DwmQueryThumbnailSourceSize(thumb:Handle,size:*mut ThumbSize)->i32;
@@ -269,4 +303,66 @@ pub fn show_preview(source:usize,dock_top:i32){
         ShowWindow(win,8); // SW_SHOWNA; não desvia o foco
         if let Ok(mut state)=preview_state().lock(){*state=Some(Preview{win:win as usize,thumb:thumb as usize});}
     }
+}
+
+// Ctrl+Alt+Space abre o Iniciar da React Dock em todo o Windows.
+// A tecla Windows sozinha continua nativa, preservando os atalhos do shell.
+#[repr(C)] struct HotKeyMessage {
+    hwnd:Handle, message:u32, wparam:usize, lparam:isize, time:u32,
+    pt:Point, private:u32,
+}
+#[link(name="user32")]
+extern "system" {
+    fn RegisterHotKey(hwnd:Handle,id:i32,modifiers:u32,key:u32)->i32;
+    fn UnregisterHotKey(hwnd:Handle,id:i32)->i32;
+    fn GetMessageW(msg:*mut HotKeyMessage,hwnd:Handle,min:u32,max:u32)->i32;
+}
+pub fn spawn_start_shortcut<F:Fn()+Send+'static>(callback:F){
+    std::thread::spawn(move||unsafe {
+        const ID:i32=0x430;
+        if RegisterHotKey(ptr::null_mut(),ID,0x0001|0x0002,0x20)==0{return;}
+        loop {
+            let mut msg:HotKeyMessage=std::mem::zeroed();
+            if GetMessageW(&mut msg,ptr::null_mut(),0,0)<=0{break;}
+            if msg.message==0x0312 && msg.wparam==ID as usize {callback();}
+        }
+        UnregisterHotKey(ptr::null_mut(),ID);
+    });
+}
+
+
+// Catálogo local de atalhos disponíveis no menu Iniciar do usuário e do computador.
+// Não executamos nem inspecionamos o conteúdo dos atalhos: só listamos caminhos.
+#[derive(Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct StartShortcut {pub name:String,pub target:String}
+pub fn start_shortcuts()->Vec<StartShortcut>{
+    let mut roots=Vec::new();
+    if let Some(appdata)=std::env::var_os("APPDATA"){
+        roots.push(std::path::PathBuf::from(appdata).join("Microsoft\Windows\Start Menu\Programs"));
+    }
+    if let Some(programdata)=std::env::var_os("PROGRAMDATA"){
+        roots.push(std::path::PathBuf::from(programdata).join("Microsoft\Windows\Start Menu\Programs"));
+    }
+    let mut result=Vec::new();
+    let mut seen=std::collections::HashSet::new();
+    let mut pending=roots.into_iter().map(|p|(p,0)).collect::<Vec<_>>();
+    while let Some((path,depth))=pending.pop(){
+        if result.len()>=360{break;}
+        let Ok(files)=std::fs::read_dir(path) else {continue};
+        for f in files.flatten(){
+            if result.len()>=360{break;}
+            let path=f.path();
+            if path.is_dir() && depth<5 {pending.push((path,depth+1));continue;}
+            let ext=path.extension().and_then(|s|s.to_str()).unwrap_or("");
+            if !ext.eq_ignore_ascii_case("lnk") && !ext.eq_ignore_ascii_case("url"){continue;}
+            let name=path.file_stem().and_then(|s|s.to_str()).unwrap_or("").trim();
+            if name.is_empty() || name.to_lowercase().contains("uninstall"){continue;}
+            if seen.insert(name.to_lowercase()){
+                result.push(StartShortcut{name:name.to_string(),target:path.to_string_lossy().into_owned()});
+            }
+        }
+    }
+    result.sort_by(|a,b|a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result
 }
